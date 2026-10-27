@@ -1,0 +1,692 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+    <meta charset="UTF-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <title>Voice Controller</title>
+
+    <style>
+
+        html,
+        body {
+
+            margin: 0;
+            padding: 0;
+
+            width: 100%;
+            height: 100%;
+
+            background: transparent;
+
+            font-family:
+                -apple-system,
+                BlinkMacSystemFont,
+                "Segoe UI",
+                sans-serif;
+        }
+
+        body {
+
+            display: flex;
+
+            align-items: center;
+
+            justify-content: center;
+        }
+
+        #enableVoice {
+
+            border: none;
+
+            border-radius: 10px;
+
+            padding:
+                9px
+                16px;
+
+            background:
+                #ff4b4b;
+
+            color: white;
+
+            font-size: 14px;
+
+            font-weight: 600;
+
+            cursor: pointer;
+        }
+
+        #enableVoice:hover {
+
+            opacity: 0.9;
+        }
+
+        #status {
+
+            color:
+                rgba(
+                    128,
+                    128,
+                    128,
+                    0.9
+                );
+
+            font-size: 13px;
+        }
+
+    </style>
+
+</head>
+
+
+<body>
+
+    <button
+        id="enableVoice"
+        type="button"
+    >
+        🔊 Enable Voice
+    </button>
+
+    <div
+        id="status"
+        hidden
+    >
+        Voice ready
+    </div>
+
+
+<script>
+
+
+// ============================================================
+// CONFIG
+// ============================================================
+
+const params =
+    new URLSearchParams(
+        window.location.search
+    );
+
+const clientId =
+    params.get(
+        "client_id"
+    );
+
+const AUDIO_SAMPLE_RATE = 24000;
+
+
+// ============================================================
+// ELEMENTS
+// ============================================================
+
+const enableButton =
+    document.getElementById(
+        "enableVoice"
+    );
+
+const status =
+    document.getElementById(
+        "status"
+    );
+
+
+// ============================================================
+// STATE
+// ============================================================
+
+let audioContext = null;
+
+let socket = null;
+
+let nextStartTime = 0;
+
+let voiceEnabled = false;
+
+let reconnectTimer = null;
+
+
+// ============================================================
+// DEBUG
+// ============================================================
+
+function debug(message) {
+
+    console.log(
+        "[VOICE]",
+        message
+    );
+}
+
+
+// ============================================================
+// WEBSOCKET URL
+// ============================================================
+
+function getWebSocketUrl() {
+
+    const protocol =
+        window.location.protocol
+        === "https:"
+            ? "wss:"
+            : "ws:";
+
+    const hostname =
+        window.location.hostname
+        || "127.0.0.1";
+
+    return (
+        protocol
+        + "//"
+        + hostname
+        + ":8765/ws/"
+        + encodeURIComponent(
+            clientId
+        )
+    );
+}
+
+
+// ============================================================
+// AUDIO CONTEXT
+// ============================================================
+
+async function createAudioContext() {
+
+    if (audioContext) {
+
+        if (
+            audioContext.state
+            === "suspended"
+        ) {
+
+            await audioContext.resume();
+        }
+
+        return;
+    }
+
+    debug(
+        "Creating AudioContext"
+    );
+
+    audioContext =
+        new AudioContext({
+            latencyHint:
+                "interactive"
+        });
+
+    await audioContext.resume();
+
+    nextStartTime =
+        audioContext.currentTime;
+
+    debug(
+        "AudioContext state="
+        + audioContext.state
+        + " sampleRate="
+        + audioContext.sampleRate
+    );
+}
+
+
+// ============================================================
+// PCM CONVERSION
+// ============================================================
+
+function pcm16ToFloat32(
+    arrayBuffer
+) {
+
+    const int16 =
+        new Int16Array(
+            arrayBuffer
+        );
+
+    const float32 =
+        new Float32Array(
+            int16.length
+        );
+
+    for (
+        let i = 0;
+        i < int16.length;
+        i++
+    ) {
+
+        float32[i] =
+            int16[i] / 32768;
+    }
+
+    return float32;
+}
+
+
+// ============================================================
+// PLAY PCM
+// ============================================================
+
+function playPCM(
+    arrayBuffer
+) {
+
+    if (
+        !audioContext
+    ) {
+
+        debug(
+            "AudioContext not ready"
+        );
+
+        return;
+    }
+
+    if (
+        audioContext.state
+        === "suspended"
+    ) {
+
+        debug(
+            "AudioContext suspended"
+        );
+
+        return;
+    }
+
+    const samples =
+        pcm16ToFloat32(
+            arrayBuffer
+        );
+
+    if (
+        samples.length === 0
+    ) {
+
+        return;
+    }
+
+    const audioBuffer =
+        audioContext.createBuffer(
+            1,
+            samples.length,
+            AUDIO_SAMPLE_RATE
+        );
+
+    audioBuffer
+        .getChannelData(0)
+        .set(samples);
+
+
+    const source =
+        audioContext.createBufferSource();
+
+    source.buffer =
+        audioBuffer;
+
+    source.connect(
+        audioContext.destination
+    );
+
+
+    const now =
+        audioContext.currentTime;
+
+
+    // --------------------------------------------------------
+    // Keep a tiny safety buffer.
+    // --------------------------------------------------------
+
+    if (
+        nextStartTime
+        < now + 0.03
+    ) {
+
+        nextStartTime =
+            now + 0.03;
+    }
+
+
+    source.start(
+        nextStartTime
+    );
+
+
+    nextStartTime +=
+        audioBuffer.duration;
+
+
+    source.onended = () => {
+
+        source.disconnect();
+
+    };
+}
+
+
+// ============================================================
+// CONNECT WEBSOCKET
+// ============================================================
+
+function connectWebSocket() {
+
+    if (
+        socket
+        && (
+            socket.readyState
+            === WebSocket.OPEN
+            ||
+            socket.readyState
+            === WebSocket.CONNECTING
+        )
+    ) {
+
+        return;
+    }
+
+
+    const url =
+        getWebSocketUrl();
+
+
+    debug(
+        "Connecting WebSocket: "
+        + url
+    );
+
+
+    socket =
+        new WebSocket(
+            url
+        );
+
+
+    socket.binaryType =
+        "arraybuffer";
+
+
+    // --------------------------------------------------------
+    // OPEN
+    // --------------------------------------------------------
+
+    socket.onopen = () => {
+
+        debug(
+            "WebSocket connected"
+        );
+
+        status.hidden =
+            false;
+
+        status.textContent =
+            "Voice ready";
+
+        socket.send(
+            "ping"
+        );
+    };
+
+
+    // --------------------------------------------------------
+    // MESSAGE
+    // --------------------------------------------------------
+
+    socket.onmessage = (
+        event
+    ) => {
+
+        if (
+            typeof event.data
+            === "string"
+        ) {
+
+            debug(
+                "Control message: "
+                + event.data
+            );
+
+            return;
+        }
+
+
+        if (
+            event.data
+            instanceof ArrayBuffer
+        ) {
+
+            playPCM(
+                event.data
+            );
+
+            return;
+        }
+
+
+        if (
+            event.data
+            instanceof Blob
+        ) {
+
+            event.data
+                .arrayBuffer()
+                .then(
+                    playPCM
+                );
+        }
+    };
+
+
+    // --------------------------------------------------------
+    // CLOSE
+    // --------------------------------------------------------
+
+    socket.onclose = () => {
+
+        debug(
+            "WebSocket closed"
+        );
+
+        if (
+            reconnectTimer
+        ) {
+
+            clearTimeout(
+                reconnectTimer
+            );
+        }
+
+
+        reconnectTimer =
+            setTimeout(
+                connectWebSocket,
+                1000
+            );
+    };
+
+
+    // --------------------------------------------------------
+    // ERROR
+    // --------------------------------------------------------
+
+    socket.onerror = (
+        error
+    ) => {
+
+        debug(
+            "WebSocket error"
+        );
+
+        console.error(
+            error
+        );
+    };
+}
+
+
+// ============================================================
+// ENABLE VOICE
+// ============================================================
+
+async function enableVoice() {
+
+    try {
+
+        await createAudioContext();
+
+
+        voiceEnabled =
+            true;
+
+
+        localStorage.setItem(
+            "phonon_voice_enabled",
+            "true"
+        );
+
+
+        enableButton.hidden =
+            true;
+
+
+        status.hidden =
+            false;
+
+
+        status.textContent =
+            "Voice enabled";
+
+
+        debug(
+            "Voice enabled by user"
+        );
+
+
+        connectWebSocket();
+
+
+    } catch (error) {
+
+        console.error(
+            error
+        );
+
+
+        status.hidden =
+            false;
+
+
+        status.textContent =
+            "Could not enable voice";
+
+
+        debug(
+            "Enable voice failed: "
+            + error.message
+        );
+    }
+}
+
+
+// ============================================================
+// BUTTON
+// ============================================================
+
+enableButton.addEventListener(
+    "click",
+    enableVoice
+);
+
+
+// ============================================================
+// INITIALIZATION
+// ============================================================
+
+async function initialize() {
+
+    debug(
+        "Voice component loaded"
+    );
+
+
+    // --------------------------------------------------------
+    // Always establish WebSocket.
+    // --------------------------------------------------------
+
+    connectWebSocket();
+
+
+    // --------------------------------------------------------
+    // Check whether user previously enabled voice.
+    // --------------------------------------------------------
+
+    const previouslyEnabled =
+        localStorage.getItem(
+            "phonon_voice_enabled"
+        )
+        === "true";
+
+
+    if (
+        previouslyEnabled
+    ) {
+
+        enableButton.hidden =
+            true;
+
+        status.hidden =
+            false;
+
+        status.textContent =
+            "Voice ready";
+
+
+        // ----------------------------------------------------
+        // Browser autoplay policy may still require a gesture
+        // after an iframe/page reload.
+        // ----------------------------------------------------
+
+        try {
+
+            await createAudioContext();
+
+            voiceEnabled =
+                true;
+
+            debug(
+                "Previous voice permission detected"
+            );
+
+        } catch (error) {
+
+            debug(
+                "Browser requires a user gesture: "
+                + error.message
+            );
+
+            enableButton.hidden =
+                false;
+
+            status.hidden =
+                false;
+
+            status.textContent =
+                "Click Enable Voice once";
+        }
+    }
+}
+
+
+initialize();
+
+
+</script>
+
+</body>
+
+</html>
