@@ -544,12 +544,6 @@ async function enableVoice() {
             true;
 
 
-        localStorage.setItem(
-            "phonon_voice_enabled",
-            "true"
-        );
-
-
         enableButton.hidden =
             true;
 
@@ -620,65 +614,14 @@ async function initialize() {
 
     connectWebSocket();
 
+    enableButton.hidden =
+        false;
 
-    // --------------------------------------------------------
-    // Check whether user previously enabled voice.
-    // --------------------------------------------------------
+    status.hidden =
+        false;
 
-    const previouslyEnabled =
-        localStorage.getItem(
-            "phonon_voice_enabled"
-        )
-        === "true";
-
-
-    if (
-        previouslyEnabled
-    ) {
-
-        enableButton.hidden =
-            true;
-
-        status.hidden =
-            false;
-
-        status.textContent =
-            "Voice ready";
-
-
-        // ----------------------------------------------------
-        // Browser autoplay policy may still require a gesture
-        // after an iframe/page reload.
-        // ----------------------------------------------------
-
-        try {
-
-            await createAudioContext();
-
-            voiceEnabled =
-                true;
-
-            debug(
-                "Previous voice permission detected"
-            );
-
-        } catch (error) {
-
-            debug(
-                "Browser requires a user gesture: "
-                + error.message
-            );
-
-            enableButton.hidden =
-                false;
-
-            status.hidden =
-                false;
-
-            status.textContent =
-                "Click Enable Voice once";
-        }
-    }
+    status.textContent =
+        "Click Enable Voice to start";
 }
 
 
